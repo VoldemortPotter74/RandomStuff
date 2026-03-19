@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="CmdManager/CmdManager.vcxproj" Id="d8d1b782-57fe-4a4e-b2c2-c5b7aa3abd11" />
+  <Project Path="Main/Main.vcxproj" Id="5a2c6444-801d-4835-bf25-b3e46c9ccd67" />
+  <Project Path="Tool/Tool.vcxproj" Id="d615c479-c834-439e-bc31-6fe459ab633b" />
+</Solution>
