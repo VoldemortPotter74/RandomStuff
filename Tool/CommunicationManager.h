@@ -16,15 +16,15 @@
 #define AES_KEY_SIZE (32)
 #define KEY_TEXT ("If you see this, get a life!!!")
 
-typedef struct _COMMUNICATION_MANAGER{
+typedef struct _COMMUNICATION_MANAGER
+{
     SOCKET m_socket;
     BYTE m_abAesKey[AES_KEY_SIZE];
-    WSAEVENT m_hSocketRecvEvent;
-    WSAEVENT m_hSocketSendEvent;
     HANDLE m_hTerminateEvent;
 } COMMUNICATION_MANAGER, *PCOMMUNICATION_MANAGER;
 
-typedef struct _COMMAND{
+typedef struct _COMMAND
+{
     DWORD m_dwCommandId;
     DWORD m_dwDataLength;
     BYTE* m_pbData;

@@ -34,6 +34,37 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     return TRUE;
 }
 
+void flushStdout(HANDLE i_hStdoutPipe)
+{
+    if (i_hStdoutPipe == NULL || i_hStdoutPipe == INVALID_HANDLE_VALUE)
+        return;
+
+    DWORD dwBytesAvailable = 0;
+
+    // Check how many bytes are available to read
+    if (!PeekNamedPipe(i_hStdoutPipe, NULL, 0, NULL, &dwBytesAvailable, NULL))
+        return;
+
+    // Loop until the pipe is empty
+    while (dwBytesAvailable > 0)
+    {
+        char acBuffer[256]; // temporary buffer
+        DWORD dwBytesToRead = dwBytesAvailable < sizeof(acBuffer) ? dwBytesAvailable : sizeof(acBuffer);
+        DWORD dwBytesRead = 0;
+
+        if ((!ReadFile(i_hStdoutPipe, acBuffer, dwBytesToRead, &dwBytesRead, NULL)) || (dwBytesRead == 0))
+        {
+            break; // nothing left to read or read failed
+        }
+
+        // Check again if more data has arrived
+        if (!PeekNamedPipe(i_hStdoutPipe, NULL, 0, NULL, &dwBytesAvailable, NULL))
+        {
+            break; // failed to check, stop
+        }
+    }
+}
+
 static BOOL startCmdProcess(VOID) {
     // In case startCmdProcess is called more than once, ensure we
     // release any previous handles before overwriting globals.
@@ -46,11 +77,13 @@ static BOOL startCmdProcess(VOID) {
     HANDLE stdinPipe[2] = { 0 };
     HANDLE stdoutPipe[2] = { 0 };
 
-    if (!CreatePipe(&stdinPipe[0], &stdinPipe[1], &sa, 0)) {
+    if (!CreatePipe(&stdinPipe[0], &stdinPipe[1], &sa, 0)) 
+    {
         return FALSE;
     }
 
-    if (!CreatePipe(&stdoutPipe[0], &stdoutPipe[1], &sa, 0)) {
+    if (!CreatePipe(&stdoutPipe[0], &stdoutPipe[1], &sa, 0)) 
+    {
         CloseHandle(stdinPipe[0]);
         CloseHandle(stdinPipe[1]);
         return FALSE;
@@ -65,7 +98,7 @@ static BOOL startCmdProcess(VOID) {
     si.hStdError = stdoutPipe[1];
 
     PROCESS_INFORMATION pi = { 0 };
-    char* cmdLine = "cmd.exe /Q /D /K";
+    char* cmdLine = "cmd.exe /Q /D /K \"prompt \"\" & echo READY\"";
     BOOL success = CreateProcessA(
         NULL,
         cmdLine,
@@ -87,6 +120,8 @@ static BOOL startCmdProcess(VOID) {
         CloseHandle(stdoutPipe[0]);
         return FALSE;
     }
+
+    flushStdout(stdoutPipe[0]);
 
     g_cmdProcessInfo.processInfo = pi;
     g_cmdProcessInfo.hStdin = stdinPipe[1];
@@ -140,6 +175,8 @@ DWORD WINAPI CmdManager_ExecuteCmd(const char* cmd, DWORD cmdLength) {
     if (!cmdString) {
         return ERROR_OUTOFMEMORY;
     }
+
+    flushStdout(g_cmdProcessInfo.hStdout);
 
     memcpy(cmdString, cmd, cmdLength);
     cmdString[cmdLength] = '\r';

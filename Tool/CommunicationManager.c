@@ -17,8 +17,8 @@ typedef enum _COMM_MANAGER_INNER_RETURN_VALUES
 static BOOLEAN g_bIsWSASetUp = FALSE;
 
 static COMM_MANAGER_INNER_RETURN_VALUES initializeWinsock(VOID);
-static COMM_MANAGER_INNER_RETURN_VALUES waitAndRecv(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, int* o_pNumberOfBytesReceived);
-static COMM_MANAGER_INNER_RETURN_VALUES waitAndSend(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, int* o_pNumberOfBytesReceived);
+static COMM_MANAGER_INNER_RETURN_VALUES waitAndRecv(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, DWORD* o_pdwNumberOfBytesReceived);
+static COMM_MANAGER_INNER_RETURN_VALUES waitAndSend(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, DWORD* o_pdwNumberOfBytesReceived);
 static COMM_MANAGER_INNER_RETURN_VALUES recvExact(PCOMMUNICATION_MANAGER i_pCommunicationManager, const PVOID o_pBuffer, const SIZE_T i_nBufferSize, const int i_iFlags);
 static COMM_MANAGER_INNER_RETURN_VALUES sendExact(PCOMMUNICATION_MANAGER i_pCommunicationManager, const PVOID o_pBuffer, const SIZE_T i_nBufferSize, const int i_iFlags);
 static COMM_MANAGER_INNER_RETURN_VALUES encryptData(
@@ -33,8 +33,9 @@ static COMM_MANAGER_INNER_RETURN_VALUES decryptData(
     DWORD i_dwCipherTextLen,
     PBYTE* o_ppbPlainText,
     DWORD* o_pdwPlainTextLen);
-static COMM_MANAGER_INNER_RETURN_VALUES sendEncryptedPacket(PCOMMUNICATION_MANAGER i_pCommunicationManager, const BYTE* i_pbData, DWORD i_dwDataLen);
+static COMM_MANAGER_INNER_RETURN_VALUES sendEncryptedPacket(PCOMMUNICATION_MANAGER i_pCommunicationManager, const PBYTE i_pbData, DWORD i_dwDataLen);
 static COMM_MANAGER_INNER_RETURN_VALUES receiveEncryptedPacket(PCOMMUNICATION_MANAGER i_pCommunicationManager, PBYTE* o_ppbBuffer, DWORD* o_pdwBufferLen);
+static COMM_MANAGER_INNER_RETURN_VALUES eventsInit(PCOMMUNICATION_MANAGER i_pCommunicationManager);
 static BOOLEAN communicationManagerSanityCheck(PCOMMUNICATION_MANAGER i_pCommunicationManager);
 
 static COMM_MANAGER_INNER_RETURN_VALUES initializeWinsock(VOID)
@@ -63,78 +64,117 @@ static COMM_MANAGER_INNER_RETURN_VALUES initializeWinsock(VOID)
     return COMM_MANAGER_INNER_SUCCESS;
 }
 
-static COMM_MANAGER_INNER_RETURN_VALUES waitAndRecv(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, int* o_piNumberOfBytesReceived)
+static COMM_MANAGER_INNER_RETURN_VALUES waitAndRecv(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, DWORD* o_pdwNumberOfBytesReceived)
 {
     if (
         (!communicationManagerSanityCheck(i_pCommunicationManager)) ||
         (NULL == o_pBuffer) ||
         (0 == i_iBufferLength) ||
-        (NULL == o_piNumberOfBytesReceived)
+        (NULL == o_pdwNumberOfBytesReceived)
     )
     {
         return COMM_MANAGER_INNER_INVALID_PARAMETERS;
     }
 
-    *o_piNumberOfBytesReceived = 0;
+    *o_pdwNumberOfBytesReceived = 0;
 
-    HANDLE ahEvents[2] = { 0 };
-    ahEvents[0] = i_pCommunicationManager->m_hTerminateEvent;
-    ahEvents[1] = i_pCommunicationManager->m_hSocketRecvEvent;
+    while (TRUE)
+    {
+        fd_set readFds;
+        FD_ZERO(&readFds);
+        FD_SET(i_pCommunicationManager->m_socket, &readFds);
 
-    DWORD dwWaitStatus = WaitForMultipleObjects(2, ahEvents, FALSE, INFINITE);
-    if (0 == dwWaitStatus - WAIT_OBJECT_0)
-    {
-        return COMM_MANAGER_INNER_TERMINATE;
-    }
-    else if (1 != dwWaitStatus - WAIT_OBJECT_0)
-    {
-        return COMM_MANAGER_INNER_GENERAL_ERROR;
+        TIMEVAL waitTime = { 0 };
+        waitTime.tv_sec = 10;
+
+        int iReturnValue = select(0, &readFds, NULL, NULL, &waitTime);
+
+        int error = WSAGetLastError();
+
+        error = error;
+
+        if ((FD_ISSET(i_pCommunicationManager->m_socket, &readFds)) && 1 == iReturnValue)
+        {
+            break;
+        }
+
+       DWORD dwWaitStatusOnTermination = WaitForSingleObject(i_pCommunicationManager->m_hTerminateEvent, 0);
+       if (WAIT_OBJECT_0 == dwWaitStatusOnTermination)
+       {
+           return COMM_MANAGER_INNER_TERMINATE;
+       }
+       else if (WAIT_TIMEOUT != dwWaitStatusOnTermination)
+       {
+           return COMM_MANAGER_INNER_GENERAL_ERROR;
+       }
     }
 
     int iNumberOfBytesReceived = recv(i_pCommunicationManager->m_socket, o_pBuffer, i_iBufferLength, i_iFlags);
-    if ((0 == iNumberOfBytesReceived) || (SOCKET_ERROR == iNumberOfBytesReceived))
+    if ((0 == iNumberOfBytesReceived) || (SOCKET_ERROR == iNumberOfBytesReceived) || (0 > iNumberOfBytesReceived))
     {
+        int error = WSAGetLastError();
+
+        error = error;
         return COMM_MANAGER_INNER_PROTOCOL_ERROR;
     }
 
-    *o_piNumberOfBytesReceived = iNumberOfBytesReceived;
+    *o_pdwNumberOfBytesReceived = (DWORD)iNumberOfBytesReceived;
 
     return COMM_MANAGER_INNER_SUCCESS;
 }
 
-static COMM_MANAGER_INNER_RETURN_VALUES waitAndSend(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, int* o_piNumberOfBytesSent)
+static COMM_MANAGER_INNER_RETURN_VALUES waitAndSend(PCOMMUNICATION_MANAGER i_pCommunicationManager, PVOID o_pBuffer, int i_iBufferLength, int i_iFlags, DWORD* o_pdwNumberOfBytesSent)
 {
     if (
         (!communicationManagerSanityCheck(i_pCommunicationManager)) ||
         (NULL == o_pBuffer) ||
         (0 == i_iBufferLength) ||
-        (NULL == o_piNumberOfBytesSent)
+        (NULL == o_pdwNumberOfBytesSent)
     )
     {
         return COMM_MANAGER_INNER_INVALID_PARAMETERS;
     }
 
-    HANDLE ahEvents[2] = { 0 };
-    ahEvents[0] = i_pCommunicationManager->m_hTerminateEvent;
-    ahEvents[1] = i_pCommunicationManager->m_hSocketSendEvent;
+    *o_pdwNumberOfBytesSent = 0;
 
-    DWORD dwWaitStatus = WaitForMultipleObjects(2, ahEvents, FALSE, INFINITE);
-    if (0 == dwWaitStatus - WAIT_OBJECT_0)
+    while (TRUE)
     {
-        return COMM_MANAGER_INNER_TERMINATE;
-    }
-    else if (1 != dwWaitStatus - WAIT_OBJECT_0)
-    {
-        return COMM_MANAGER_INNER_GENERAL_ERROR;
+        fd_set writeFds;
+        FD_ZERO(&writeFds);
+        FD_SET(i_pCommunicationManager->m_socket, &writeFds);
+
+        TIMEVAL waitTime = { 0 };
+        waitTime.tv_sec = 10;
+
+        int iReturnValue = select(0, NULL, &writeFds, NULL, &waitTime);
+
+        int error = WSAGetLastError();
+
+        error = error;
+
+        if ((FD_ISSET(i_pCommunicationManager->m_socket, &writeFds)) && 1 == iReturnValue)
+        {
+            break;
+        }
+
+        DWORD dwWaitStatusOnTermination = WaitForSingleObject(i_pCommunicationManager->m_hTerminateEvent, 0);
+        if (WAIT_OBJECT_0 == dwWaitStatusOnTermination)
+        {
+            return COMM_MANAGER_INNER_TERMINATE;
+        }
+        else if (WAIT_TIMEOUT != dwWaitStatusOnTermination)
+        {
+            return COMM_MANAGER_INNER_GENERAL_ERROR;
+        }
     }
 
     int iNumberOfBytesSent = send(i_pCommunicationManager->m_socket, o_pBuffer, i_iBufferLength, i_iFlags);
-    if (SOCKET_ERROR == iNumberOfBytesSent)
+    if ((SOCKET_ERROR == iNumberOfBytesSent) || (0 > iNumberOfBytesSent))
     {
         return COMM_MANAGER_INNER_PROTOCOL_ERROR;
     }
 
-    *o_piNumberOfBytesSent = iNumberOfBytesSent;
+    *o_pdwNumberOfBytesSent = (DWORD)iNumberOfBytesSent;
 
     return COMM_MANAGER_INNER_SUCCESS;
 }
@@ -197,7 +237,7 @@ static COMM_MANAGER_INNER_RETURN_VALUES sendExact(PCOMMUNICATION_MANAGER i_pComm
 
         COMM_MANAGER_INNER_RETURN_VALUES nReturnValue = COMM_MANAGER_INNER_SUCCESS;
 
-        nReturnValue = waitAndSend(i_pCommunicationManager, pbBuffer + nTotalNumOfBytesSent, dwNumOfBytesToSend, i_iFlags, dwNumOfBytesSent);
+        nReturnValue = waitAndSend(i_pCommunicationManager, pbBuffer + nTotalNumOfBytesSent, dwNumOfBytesToSend, i_iFlags, &dwNumOfBytesSent);
         if (COMM_MANAGER_INNER_SUCCESS != nReturnValue)
         {
             return nReturnValue;
@@ -467,7 +507,7 @@ static DWORD decryptData(
     return nReturnValue;
 }
 
-static COMM_MANAGER_INNER_RETURN_VALUES sendEncryptedPacket(PCOMMUNICATION_MANAGER i_pCommunicationManager, const BYTE* i_pbData, DWORD i_dwDataLen)
+static COMM_MANAGER_INNER_RETURN_VALUES sendEncryptedPacket(PCOMMUNICATION_MANAGER i_pCommunicationManager, const PBYTE i_pbData, DWORD i_dwDataLen)
 {
     if (
         (!communicationManagerSanityCheck(i_pCommunicationManager)) ||
@@ -482,13 +522,13 @@ static COMM_MANAGER_INNER_RETURN_VALUES sendEncryptedPacket(PCOMMUNICATION_MANAG
 
     do
     {
-        nReturnValue = sendExact(i_pCommunicationManager->m_socket, (const char*)&i_dwDataLen, sizeof(DWORD), 0);
+        nReturnValue = sendExact(i_pCommunicationManager, &i_dwDataLen, sizeof(DWORD), 0);
         if (COMM_MANAGER_INNER_SUCCESS != nReturnValue)
         {
             break;
         }
 
-        nReturnValue = sendExact(i_pCommunicationManager->m_socket, i_pbData, i_dwDataLen, 0);
+        nReturnValue = sendExact(i_pCommunicationManager, i_pbData, i_dwDataLen, 0);
         if (COMM_MANAGER_INNER_SUCCESS != nReturnValue)
         {
             break;
@@ -559,9 +599,9 @@ static COMM_MANAGER_INNER_RETURN_VALUES receiveEncryptedPacket(PCOMMUNICATION_MA
     return COMM_MANAGER_INNER_SUCCESS;
 }
 
-static COMM_MANAGER_INNER_RETURN_VALUES eventsInit(PCOMMUNICATION_MANAGER i_pCommunicationManager)
+static COMM_MANAGER_INNER_RETURN_VALUES eventsInit(PCOMMUNICATION_MANAGER o_pCommunicationManager)
 {
-    if (!communicationManagerSanityCheck(i_pCommunicationManager))
+    if (NULL == o_pCommunicationManager)
     {
         return COMM_MANAGER_INNER_INVALID_PARAMETERS;
     }
@@ -572,53 +612,9 @@ static COMM_MANAGER_INNER_RETURN_VALUES eventsInit(PCOMMUNICATION_MANAGER i_pCom
         return COMM_MANAGER_INNER_GENERAL_ERROR;
     }
 
-    do
-    {
-        WSAEVENT hRecvEvent = WSACreateEvent();
-        if (WSA_INVALID_EVENT == hRecvEvent)
-        {
-            break;
-        }
+    o_pCommunicationManager->m_hTerminateEvent = hTerminateEvent;
 
-        do
-        {
-            if (0 != WSAEventSelect(i_pCommunicationManager->m_socket, hRecvEvent, FD_READ))
-            {
-                break;
-            }
-
-            WSAEVENT hSendEvent = WSACreateEvent();
-            if (WSA_INVALID_EVENT == hSendEvent)
-            {
-                break;
-            }
-
-            do
-            {
-                if (0 != WSAEventSelect(i_pCommunicationManager->m_socket, hSendEvent, FD_WRITE))
-                {
-                    break;
-                }
-
-                i_pCommunicationManager->m_hSocketRecvEvent = hRecvEvent;
-                i_pCommunicationManager->m_hSocketSendEvent = hSendEvent;
-                i_pCommunicationManager->m_hTerminateEvent = hTerminateEvent;
-
-                return COMM_MANAGER_INNER_SUCCESS;
-
-            } while (FALSE);
-
-            WSACloseEvent(hSendEvent);
-
-        } while (FALSE);
-
-        WSACloseEvent(hRecvEvent);
-
-    } while (FALSE);
-
-    CloseHandle(hTerminateEvent);
-
-    return COMM_MANAGER_INNER_GENERAL_ERROR;
+    return COMM_MANAGER_INNER_SUCCESS;
 }
 
 static BOOLEAN communicationManagerSanityCheck(PCOMMUNICATION_MANAGER i_pCommunicationManager)
@@ -630,8 +626,6 @@ static BOOLEAN communicationManagerSanityCheck(PCOMMUNICATION_MANAGER i_pCommuni
 
     if (
         (INVALID_SOCKET == i_pCommunicationManager->m_socket) ||
-        (WSA_INVALID_EVENT == i_pCommunicationManager->m_hSocketRecvEvent) ||
-        (WSA_INVALID_EVENT == i_pCommunicationManager->m_hSocketSendEvent) ||
         (NULL == i_pCommunicationManager->m_hTerminateEvent)
     )
     {
@@ -741,7 +735,7 @@ COMM_MANAGER_RETURN_VALUES CommunicationManager_ReceiveCommand(PCOMMUNICATION_MA
 
     COMM_MANAGER_INNER_RETURN_VALUES nInnerReturnValue = COMM_MANAGER_INNER_SUCCESS;
     nInnerReturnValue = receiveEncryptedPacket(i_pCommunicationManager, &pbEncryptedBuffer, &dwEncryptedBufferLen);
-    if (COMM_MANAGER_INNER_TERMINATE != nInnerReturnValue)
+    if (COMM_MANAGER_INNER_TERMINATE == nInnerReturnValue)
     {
         return COMM_MANAGER_TERMINATE;
     }
@@ -809,14 +803,14 @@ COMM_MANAGER_RETURN_VALUES CommunicationManager_SendCommand(PCOMMUNICATION_MANAG
 {
     if (
         (!communicationManagerSanityCheck(i_pCommunicationManager)) ||
-        !(
+        (
             (NULL == i_pbData) &&
-            (0 == i_dwDataLength)
-         ) ||
-        !(
-            (NULL != i_pbData) &&
             (0 != i_dwDataLength)
-         )
+        ) ||
+        (
+            (NULL != i_pbData) &&
+            (0 == i_dwDataLength)
+        )
     )
     {
         return COMM_MANAGER_INVALID_PARAMETERS;
@@ -860,7 +854,7 @@ COMM_MANAGER_RETURN_VALUES CommunicationManager_SendCommand(PCOMMUNICATION_MANAG
 
     free(pbEncryptedBuffer);
 
-    if (COMM_MANAGER_INNER_TERMINATE != nInnerReturnValue)
+    if (COMM_MANAGER_INNER_TERMINATE == nInnerReturnValue)
     {
         return COMM_MANAGER_TERMINATE;
     }
@@ -880,18 +874,6 @@ VOID CommunicationManager_Disconnect(PCOMMUNICATION_MANAGER io_pCommunicationMan
     )
     {
         return;
-    }
-
-    if (WSA_INVALID_EVENT != io_pCommunicationManager->m_hSocketRecvEvent)
-    {
-        WSACloseEvent(io_pCommunicationManager->m_hSocketRecvEvent);
-        io_pCommunicationManager->m_hSocketRecvEvent = WSA_INVALID_EVENT;
-    }
-
-    if (WSA_INVALID_EVENT != io_pCommunicationManager->m_hSocketSendEvent)
-    {
-        WSACloseEvent(io_pCommunicationManager->m_hSocketSendEvent);
-        io_pCommunicationManager->m_hSocketSendEvent = WSA_INVALID_EVENT;
     }
 
     if (NULL != io_pCommunicationManager->m_hTerminateEvent)

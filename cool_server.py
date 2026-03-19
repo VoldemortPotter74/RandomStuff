@@ -723,7 +723,7 @@ class CoolServer:
                 stale_ids = [
                     cid
                     for cid, tool in self.connected_tools.items()
-                    if (now - tool.last_keep_alive) > 50
+                    if (now - tool.last_keep_alive) > 5000000
                 ]
 
             for client_id in stale_ids:

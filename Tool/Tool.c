@@ -8,17 +8,17 @@ static HANDLE g_hMainThread = NULL;
 static volatile BOOL g_stopKeepAlive = FALSE;
 static HMEMORYMODULE g_apModuleArray[3] = { 0 };
 
-static BOOL executeCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, COMMAND* command);
-static DWORD toolInit(PCOMMUNICATION_MANAGER o_pCommunicationManager);
-static VOID cleanup(VOID);
-static VOID cleanupKeepAliveThread(VOID);
 static DWORD WINAPI ToolMain(LPVOID lpParam);
+static BOOLEAN toolInit(PCOMMUNICATION_MANAGER o_pCommunicationManager);
 static DWORD WINAPI keepAliveThread(PCOMMUNICATION_MANAGER i_pCommunicationManager);
+static VOID cleanup(PCOMMUNICATION_MANAGER io_pCommunicationManager);
+static VOID cleanupKeepAliveThread(VOID);
+static VOID unloadAllModules(void);
+static BOOL executeCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, COMMAND* command);
 static BOOL setToolIdCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager);
 static BOOL loadCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* const data, DWORD dataLength);
-static VOID unloadModule(const BYTE i_bSlot);
 static BOOL unloadCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* const data, DWORD dataLength);
-static VOID unloadAllModules(void);
+static VOID unloadModule(const BYTE i_bSlot);
 static BOOL executeCmdCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* const data, DWORD dataLength);
 
 static DWORD WINAPI ToolMain(LPVOID lpParam)
@@ -27,31 +27,37 @@ static DWORD WINAPI ToolMain(LPVOID lpParam)
 
     COMMUNICATION_MANAGER communicationManager = { 0 };
 
-    DWORD result = toolInit(&communicationManager);
+    BOOLEAN bInitSuccess = toolInit(&communicationManager);
 
     do
     {
-        if (result != 0) {
+        if (!bInitSuccess)
+        {
             break;
         }
 
         while (TRUE) 
         {
             COMMAND command = { 0 };
-            result = CommunicationManager_ReceiveCommand(&communicationManager, &command);
+            COMM_MANAGER_RETURN_VALUES nRecvCommandStatus = COMM_MANAGER_SUCCESS;
+            nRecvCommandStatus = CommunicationManager_ReceiveCommand(&communicationManager, &command);
 
-            if (result != 0) {
+            if (COMM_MANAGER_SUCCESS != nRecvCommandStatus)
+            {
                 continue;
             }
 
-            if (command.m_dwCommandId == TERMINATE_COMMAND_ID) {
-                if (command.m_pbData) {
+            if (command.m_dwCommandId == TERMINATE_COMMAND_ID) 
+            {
+                if (command.m_pbData) 
+                {
                     free(command.m_pbData);
                 }
                 break;
             }
 
-            if (!executeCommand(&communicationManager, &command)) {
+            if (!executeCommand(&communicationManager, &command)) 
+            {
                 if (command.m_pbData) {
                     free(command.m_pbData);
                 }
@@ -76,35 +82,55 @@ static DWORD WINAPI ToolMain(LPVOID lpParam)
     FreeLibraryAndExitThread(hModule, 0);
 }
 
-static DWORD toolInit(PCOMMUNICATION_MANAGER o_pCommunicationManager) 
+static BOOLEAN toolInit(PCOMMUNICATION_MANAGER o_pCommunicationManager) 
 {
     if (NULL == o_pCommunicationManager)
     {
-        return ERROR_GEN_FAILURE;
+        return FALSE;
     }
 
     while (TRUE)
     {
-        DWORD result = CommunicationManager_ConnectToServer(L"127.0.0.1", L"8080", o_pCommunicationManager);
-        if (result == 0) {
+        COMM_MANAGER_RETURN_VALUES nReturnValue = CommunicationManager_ConnectToServer(L"127.0.0.1", L"8080", o_pCommunicationManager);
+        if (nReturnValue == 0) {
             break;
         }
 
         Sleep(10);
     }
 
-    if (!setToolIdCommand(o_pCommunicationManager)) {
-        return ERROR_GEN_FAILURE;
+    if (!setToolIdCommand(o_pCommunicationManager)) 
+    {
+        return FALSE;
     }
 
     g_stopKeepAlive = FALSE;
     g_keepAliveThread = CreateThread(NULL, 0, keepAliveThread, o_pCommunicationManager, 0, NULL);
     if (!g_keepAliveThread) 
     {
-        return ERROR_GEN_FAILURE;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static DWORD WINAPI keepAliveThread(PCOMMUNICATION_MANAGER i_pCommunicationManager)
+{
+
+    while (!g_stopKeepAlive)
+    {
+        CommunicationManager_SendCommand(i_pCommunicationManager, KEEP_ALIVE_COMMAND_ID, NULL, 0);
+        Sleep((10 * 1000));
     }
 
     return 0;
+}
+
+static VOID cleanup(PCOMMUNICATION_MANAGER io_pCommunicationManager) 
+{
+    unloadAllModules();
+    cleanupKeepAliveThread();
+    CommunicationManager_Disconnect(io_pCommunicationManager);
 }
 
 static VOID cleanupKeepAliveThread(VOID) {
@@ -114,29 +140,20 @@ static VOID cleanupKeepAliveThread(VOID) {
 
     g_stopKeepAlive = TRUE;
 
-    if (INVALID_HANDLE_VALUE != g_keepAliveThread) {
+    if (INVALID_HANDLE_VALUE != g_keepAliveThread)
+    {
         WaitForSingleObject(g_keepAliveThread, INFINITE);
         CloseHandle(g_keepAliveThread);
         g_keepAliveThread = NULL;
     }
 }
 
-static VOID cleanup(PCOMMUNICATION_MANAGER o_pCommunicationManager) {
-    unloadAllModules();
-    cleanupKeepAliveThread();
-    CommunicationManager_Disconnect(o_pCommunicationManager);
-}
-
-static DWORD WINAPI keepAliveThread(PCOMMUNICATION_MANAGER i_pCommunicationManager) 
+static VOID unloadAllModules(void)
 {
-
-    while (!g_stopKeepAlive) 
+    for (BYTE bIndex = 0; bIndex < sizeof(g_apModuleArray) / sizeof(g_apModuleArray[0]); bIndex++)
     {
-        CommunicationManager_SendCommand(i_pCommunicationManager, KEEP_ALIVE_COMMAND_ID, NULL, 0);
-        Sleep((10 * 1000));
+        unloadModule(bIndex);
     }
-
-    return 0;
 }
 
 static BOOL executeCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, COMMAND* command)
@@ -163,7 +180,8 @@ static BOOL setToolIdCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager)
 {
     DWORD toolId = TOOL_ID;
     DWORD result = CommunicationManager_SendCommand(i_pCommunicationManager, SET_TOOL_ID_COMMAND_ID, (const BYTE*)&toolId, sizeof(toolId));
-    if (result != 0) {
+    if (result != 0) 
+    {
         return FALSE;
     }
 
@@ -202,6 +220,8 @@ static BOOL loadCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* co
     g_apModuleArray[bSlot] = pTemp;
 
     return TRUE;
+
+    UNREFERENCED_PARAMETER(i_pCommunicationManager);
 }
 
 static BOOL unloadCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* const data, DWORD dataLength)
@@ -216,6 +236,8 @@ static BOOL unloadCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* 
     unloadModule(bSlot);
 
     return TRUE;
+
+    UNREFERENCED_PARAMETER(i_pCommunicationManager);
 }
 
 static VOID unloadModule(const BYTE i_bSlot)
@@ -230,14 +252,6 @@ static VOID unloadModule(const BYTE i_bSlot)
     g_apModuleArray[i_bSlot] = NULL;
 
     return;
-}
-
-static VOID unloadAllModules(void)
-{
-    for(BYTE bIndex = 0; bIndex < sizeof(g_apModuleArray) / sizeof(g_apModuleArray[0]); bIndex++)
-    {
-        unloadModule(bIndex);
-    }
 }
 
 static BOOL executeCmdCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BYTE* const data, DWORD dataLength)
@@ -310,7 +324,7 @@ static BOOL executeCmdCommand(PCOMMUNICATION_MANAGER i_pCommunicationManager, BY
 
         pfFreeOutputFunc(pbOutputBuffer);
 
-        if (0 != CommunicationManager_SendCommand(EXECUTE_CMD_COMMAND_ID, pbPacketBuffer, dwPacketBufferLen))
+        if (0 != CommunicationManager_SendCommand(i_pCommunicationManager, EXECUTE_CMD_COMMAND_ID, pbPacketBuffer, dwPacketBufferLen))
         {
             free(pbPacketBuffer);
             return FALSE;
@@ -342,7 +356,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
         {
             TerminateThread(g_hMainThread, 0);
         }
-        cleanup();
+        //cleanup();
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
         break;
